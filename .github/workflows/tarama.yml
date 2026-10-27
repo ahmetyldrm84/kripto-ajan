@@ -1,17 +1,22 @@
 name: Kripto Ajan
-
+ 
 on:
   schedule:
     - cron: "*/5 * * * *"    # 5 dakikada bir (GitHub yoğunlukta birkaç dakika gecikebilir)
   workflow_dispatch:          # elle çalıştırma düğmesi
-
+    inputs:
+      ozet:
+        description: "Piyasa özetini şimdi gönder (test için)"
+        type: boolean
+        default: false
+ 
 permissions:
   contents: write             # durum.json'u (açık pozisyonlar) kaydetmek için
-
+ 
 concurrency:
   group: kripto-ajan          # iki tur üst üste binmesin
   cancel-in-progress: false
-
+ 
 jobs:
   tur:
     runs-on: ubuntu-latest
@@ -23,10 +28,13 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python kripto_ajan.py
+      - run: python kripto_ajan.py ${{ inputs.ozet && '--ozet' || '' }}
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+          GUNLUK_AI_LIMIT: ${{ vars.GUNLUK_AI_LIMIT }}
           BAKIYE: ${{ vars.BAKIYE }}
           DURDURMA: ${{ vars.DURDURMA }}
           IZLEME: ${{ vars.IZLEME }}
@@ -37,3 +45,4 @@ jobs:
           git config user.email "kripto-ajan@users.noreply.github.com"
           git add durum.json
           git diff --cached --quiet || (git commit -m "durum güncellendi" && git push)
+ 
