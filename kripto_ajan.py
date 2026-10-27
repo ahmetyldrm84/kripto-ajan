@@ -34,6 +34,8 @@ import html
 import time
 import datetime as dt
 
+import xml.etree.ElementTree as ET
+
 import requests
 
 # ---------------------------------------------------------------- AYARLAR
@@ -50,6 +52,15 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 DURUM_DOSYA = os.getenv("DURUM_DOSYA", "durum.json")
 GATE = "https://api.gateio.ws/api/v4"
 TEST = "--test" in sys.argv
+
+# Claude analiz katmanı (anahtar yoksa bot kural tabanlı çalışmaya devam eder)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL") or "claude-sonnet-5-5"
+GUNLUK_AI_LIMIT = int(os.getenv("GUNLUK_AI_LIMIT") or 20)   # günlük en fazla API çağrısı
+HABER_KAYNAKLARI = (
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+)
 
 
 def esc(x):
@@ -219,9 +230,21 @@ def analiz_et(kontrat, fng):
     giris = son["c"]
     stop = giris - 1.5 * a if yon == "LONG" else giris + 1.5 * a
     tp = giris + 2 * (giris - stop)
-    stop_yuzde = abs(giris - stop) / giris
 
-    if puan >= 8:
+    s = {
+        "kontrat": kontrat, "yon": yon, "puan": puan, "notlar": notlar,
+        "giris": giris, "stop": stop, "tp": tp, "mum": son["t"],
+        "funding": f, "defter": lehte, "hacim_kat": hacim_kat,
+        "trend": "yukari" if e50 > e200 else "asagi", "degisim": t["degisim"],
+    }
+    boyutla(s)
+    return s
+
+
+def boyutla(s):
+    """Güven kademesine göre marj ve kaldıraç; stop'ta kayıp bakiyenin MAKS_RISK'ini geçemez."""
+    stop_yuzde = abs(s["giris"] - s["stop"]) / s["giris"]
+    if s["puan"] >= 8:
         marj, kaldirac = BAKIYE * 0.45, 7
     else:
         marj, kaldirac = BAKIYE * 0.22, 4
@@ -231,16 +254,114 @@ def analiz_et(kontrat, fng):
     if marj * kaldirac * stop_yuzde > maks_kayip:
         marj = maks_kayip / stop_yuzde
     deger = marj * kaldirac
-
-    return {
-        "kontrat": kontrat, "yon": yon, "puan": puan, "notlar": notlar,
-        "giris": giris, "stop": stop, "tp": tp, "marj": marj, "mum": son["t"],
-        "kaldirac": kaldirac, "deger": deger, "kayip": deger * stop_yuzde,
-        "kazanc": deger * stop_yuzde * 2,
-    }
+    s.update(marj=marj, kaldirac=kaldirac, deger=deger,
+             kayip=deger * stop_yuzde, kazanc=deger * stop_yuzde * 2)
 
 
-def kart(s):
+# ---------------------------------------------------------------- CLAUDE ANALİZİ
+def haberler(adet_kaynak=6):
+    basliklar = []
+    for url in HABER_KAYNAKLARI:
+        try:
+            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 kripto-ajan"})
+            r.raise_for_status()
+            n = 0
+            for item in ET.fromstring(r.content).iter("item"):
+                baslik = (item.findtext("title") or "").strip()
+                tarih = (item.findtext("pubDate") or "")[:22]
+                if baslik:
+                    basliklar.append(f"{tarih} | {baslik}")
+                    n += 1
+                if n >= adet_kaynak:
+                    break
+        except Exception as e:
+            print(f"Haber alınamadı ({url}): {e.__class__.__name__}")
+    return basliklar
+
+
+def claude_sor(sistem, mesaj, durum, max_tokens=500):
+    """Claude'a sorar. Anahtar yoksa, günlük limit dolduysa ya da hata olursa None döner."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    bugun = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    if durum.get("ai_gun") != bugun:
+        durum["ai_gun"], durum["ai_sayac"] = bugun, 0
+    if durum["ai_sayac"] >= GUNLUK_AI_LIMIT:
+        print("Günlük Claude limiti doldu, kural tabanlı devam.")
+        return None
+    durum["ai_sayac"] += 1
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
+            json={"model": CLAUDE_MODEL, "max_tokens": max_tokens, "system": sistem,
+                  "messages": [{"role": "user", "content": mesaj}]},
+            timeout=90,
+        )
+        if r.status_code != 200:
+            print(f"Claude API hatası {r.status_code}: {r.text[:300]}")
+            return None
+        return "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
+    except requests.RequestException as e:
+        print(f"Claude API'ye ulaşılamadı: {e}")
+        return None
+
+
+AI_SISTEM = """Sen disiplinli bir kripto vadeli işlem risk analistisin. Kural tabanlı bir tarayıcı
+bir kurulum buldu. Görevin bu kurulumu son haberler ve piyasa verisiyle birlikte değerlendirmek.
+
+Kurallar:
+- Stop-loss ve take-profit seviyelerini DEĞİŞTİREMEZSİN. Sadece onaylar ya da reddedersin.
+- Güveni yükseltemezsin; aynı bırakabilir ya da düşürebilirsin.
+- Yakın zamanda büyük makro olay (Fed, CPI, istihdam verisi), borsa/regülasyon şoku ya da
+  kurulumun aleyhine güçlü bir haber varsa düşür ya da reddet.
+- Haberde olmayan bir şeyi uydurma. Emin değilsen bunu söyle.
+- Meme coin önerme, kaldıraç artırma önerme.
+
+Sadece şu JSON'u döndür, başka hiçbir şey yazma:
+{"karar": "ONAY" veya "RED", "guven": 1-10 tam sayı, "yorum": "Türkçe, en fazla 3 cümle, haberle bağlantılı gerekçe", "risk": "Türkçe, tek cümle, en büyük risk"}"""
+
+
+def ai_degerlendir(s, fng, haber_listesi, durum):
+    veri = (
+        f"Kurulum: {s['kontrat']} {s['yon']} · kural güveni {s['puan']}/10\n"
+        f"Giriş {fiyat_yaz(s['giris'])} · Stop {fiyat_yaz(s['stop'])} · TP {fiyat_yaz(s['tp'])}\n"
+        f"Kural notları: {'; '.join(s['notlar']) or '-'}\n"
+        f"24s değişim {s['degisim']:+.2f}% · funding {s['funding']*100:+.4f}% · "
+        f"1s trend {s['trend']} · hacim {s['hacim_kat']:.1f}x · defter lehte %{s['defter']*100:.0f}\n"
+        f"Fear & Greed: {fng if fng is not None else 'veri yok'}\n"
+        f"Şu an (UTC): {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M}\n\n"
+        "Son haber başlıkları:\n" + ("\n".join(haber_listesi) or "haber alınamadı")
+    )
+    cevap = claude_sor(AI_SISTEM, veri, durum)
+    if not cevap:
+        return None
+    try:
+        j = json.loads(cevap[cevap.index("{"): cevap.rindex("}") + 1])
+        guven = int(j.get("guven", s["puan"]))
+        return {
+            "karar": "RED" if str(j.get("karar", "")).upper().startswith("RED") else "ONAY",
+            "guven": max(1, min(s["puan"], guven)),   # yükseltemez
+            "yorum": str(j.get("yorum", "")).strip(),
+            "risk": str(j.get("risk", "")).strip(),
+        }
+    except (ValueError, TypeError):
+        print(f"Claude cevabı okunamadı: {cevap[:200]}")
+        return None
+
+
+def ai_ozet_yorumu(ozet_satirlari, fng, haber_listesi, durum):
+    sistem = ("Sen kısa ve net konuşan bir kripto piyasa analistisin. Türkçe yaz. "
+              "Haberde olmayanı uydurma. Yatırım tavsiyesi verme, ortamı ve riskleri anlat.")
+    mesaj = (f"Fear & Greed: {fng}\nPiyasa:\n{ozet_satirlari}\n\nSon haberler:\n"
+             + ("\n".join(haber_listesi) or "haber alınamadı")
+             + "\n\nEn fazla 3 cümle: genel hava, takvimdeki/haberdeki en önemli risk, "
+               "bugün için tavır (agresif / seçici / bekle).")
+    return claude_sor(sistem, mesaj, durum, max_tokens=300)
+
+
+def kart(s, ai=None):
     ad = s["kontrat"].replace("_", "")
     coin = s["kontrat"].replace("_USDT", "")
     g = "\n".join(f"• {n}" for n in s["notlar"])
@@ -257,14 +378,20 @@ def kart(s):
     ekle = (f"/ekle {coin} {s['yon']} {fiyat_yaz(s['giris']).replace(',', '')} "
             f"{fiyat_yaz(s['stop']).replace(',', '')} {fiyat_yaz(s['tp']).replace(',', '')} "
             f"{s['deger']:.0f}")
+    if ai:
+        ai_metin = f"🧠 <b>Claude yorumu</b>\n{esc(ai['yorum'])}\n⚠️ {esc(ai['risk'])}\n\n"
+    elif ANTHROPIC_API_KEY:
+        ai_metin = "<i>Claude yorumu alınamadı, kart sadece kurallara dayanıyor.</i>\n\n"
+    else:
+        ai_metin = ""
     return (f"🎯 <b>SİNYAL · {ad} {s['yon']}</b>\n<pre>{esc(metin)}</pre>\n"
-            f"<b>Gerekçe</b>\n{esc(g)}\n\n"
+            f"<b>Kural gerekçesi</b>\n{esc(g)}\n\n{ai_metin}"
             f"Girersen takibe almak için (giriş fiyatını kendi dolumunla değiştir):\n"
             f"<code>{esc(ekle)}</code>\n\n"
             f"<i>Bot emir girmez. Stop genişletme yok, zarara ekleme yok.</i>")
 
 
-def ozet(fng, fng_ad):
+def ozet(fng, fng_ad, durum=None, haber_listesi=None):
     satirlar = []
     for k in IZLEME:
         try:
@@ -274,8 +401,13 @@ def ozet(fng, fng_ad):
                             f"{t['degisim']:+.2f}%  f:{t['funding']*100:+.4f}%  {trend}")
         except Exception as e:
             satirlar.append(f"{k}: veri alınamadı ({e.__class__.__name__})")
-    bas = f"📊 <b>Piyasa özeti</b> · F&G: {fng if fng is not None else '-'} ({esc(fng_ad)})"
-    return bas + "\n<pre>" + esc("\n".join(satirlar)) + "</pre>"
+    bas = f"📊 <b>Piyasa özeti</b> · F&amp;G: {fng if fng is not None else '-'} ({esc(fng_ad)})"
+    metin = bas + "\n<pre>" + esc("\n".join(satirlar)) + "</pre>"
+    if durum is not None and ANTHROPIC_API_KEY:
+        yorum = ai_ozet_yorumu("\n".join(satirlar), fng, haber_listesi or [], durum)
+        if yorum:
+            metin += f"\n🧠 {esc(yorum.strip())}"
+    return metin
 
 
 # ---------------------------------------------------------------- POZİSYON TAKİBİ
@@ -508,10 +640,17 @@ def tur(durum):
         return
 
     fng, fng_ad = fear_greed()
+    haber_onbellek = []
+
+    def haber_al():
+        if not haber_onbellek and ANTHROPIC_API_KEY:
+            haber_onbellek.extend(haberler() or ["haber alınamadı"])
+        return [h for h in haber_onbellek if h != "haber alınamadı"]
+
     simdi = dt.datetime.now(dt.timezone.utc)
     ozet_anahtar = simdi.strftime("%Y-%m-%d %H")
     if "--ozet" in sys.argv or (simdi.hour in OZET_SAATLERI_UTC and durum["son_ozet"] != ozet_anahtar):
-        gonder(ozet(fng, fng_ad))
+        gonder(ozet(fng, fng_ad, durum, haber_al()))
         durum["son_ozet"] = ozet_anahtar
 
     for k in IZLEME:
@@ -530,8 +669,17 @@ def tur(durum):
         durum["taranan"][k] = s["mum"]
         if s["puan"] < MIN_GUVEN:
             print(f"{k}: {s['yon']} kırılımı var ama güven {s['puan']}/10, gönderilmedi")
-        else:
-            gonder(kart(s))
+            continue
+        ai = ai_degerlendir(s, fng, haber_al(), durum) if ANTHROPIC_API_KEY else None
+        if ai:
+            if ai["karar"] == "RED" or ai["guven"] < MIN_GUVEN:
+                print(f"{k}: Claude reddetti ({ai['karar']}, {ai['guven']}/10): {ai['yorum']}")
+                continue
+            if ai["guven"] < s["puan"]:
+                s["notlar"].append(f"Claude güveni {s['puan']} → {ai['guven']} düşürdü")
+                s["puan"] = ai["guven"]
+                boyutla(s)  # daha düşük güven = daha küçük pozisyon
+        gonder(kart(s, ai))
 
 
 def main():
