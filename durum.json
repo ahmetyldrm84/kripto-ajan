@@ -1,19 +1,6 @@
 {
   "offset": 179899541,
-  "pozisyonlar": {
-    "ZEC_USDT": {
-      "yon": "LONG",
-      "giris": 1320.0,
-      "sl": 1290.0,
-      "sl_ilk": 1290.0,
-      "tp": 1380.0,
-      "deger": 40.0,
-      "acilis": "2026-10-27T22:00+00:00",
-      "uyarilar": [
-        "yakin_sl"
-      ]
-    }
-  },
+  "pozisyonlar": {},
   "taranan": {},
   "son_ozet": "2026-10-28 06",
   "ai_gun": "2026-10-28",
