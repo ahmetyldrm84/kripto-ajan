@@ -10,19 +10,6 @@
       "deger": 40.0,
       "acilis": "2026-10-27T22:00+00:00",
       "uyarilar": []
-    },
-    "BTC_USDT": {
-      "yon": "SHORT",
-      "giris": 81150.0,
-      "sl": 81450.0,
-      "sl_ilk": 81450.0,
-      "tp": 80450.0,
-      "deger": 49.0,
-      "acilis": "2026-10-28T06:51+00:00",
-      "uyarilar": [
-        "be",
-        "yakin_sl"
-      ]
     }
   },
   "taranan": {},
