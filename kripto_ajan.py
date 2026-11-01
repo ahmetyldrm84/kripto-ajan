@@ -39,7 +39,8 @@ import xml.etree.ElementTree as ET
 import requests
 
 # ---------------------------------------------------------------- AYARLAR
-IZLEME = [k.strip() for k in os.getenv("IZLEME", "BTC_USDT,ETH_USDT,XRP_USDT,SOL_USDT").split(",") if k.strip()]
+# GitHub'da tanımlanmamış değişken boş metin olarak gelir; boşsa varsayılan liste kullanılır.
+IZLEME = [k.strip() for k in (os.getenv("IZLEME") or "BTC_USDT,ETH_USDT,XRP_USDT,SOL_USDT,ZEC_USDT").split(",") if k.strip()]
 BAKIYE = float(os.getenv("BAKIYE") or 45)            # Gate.io bakiyen
 DURDURMA = float(os.getenv("DURDURMA") or 20)        # kill switch
 MIN_GUVEN = int(os.getenv("MIN_GUVEN") or 7)         # bunun altı sinyal gönderilmez
@@ -574,11 +575,15 @@ def pozisyon_takip(durum):
                    f"{pnl_yaz(p, fiyat)}.\nStop'u genişletme. İstersen erken çık, istersen stop'un çalışmasına izin ver.")
             uy.append("yakin_sl")
 
-        # Trend aleyhine döndü mü? (zarardayken, bir kez)
-        if r < -0.3 and "trend" not in uy:
+        # Trend gerçekten aleyhine döndü mü? (belirgin zarardayken, bir kez)
+        # Hem ortalamalar ters dizilmeli hem de fiyat 50'lik ortalamanın yanlış tarafında olmalı.
+        if r <= -0.5 and "trend" not in uy:
             try:
-                tr = trend_1s(k)
-                if (p["yon"] == "LONG" and tr == "asagi") or (p["yon"] == "SHORT" and tr == "yukari"):
+                kap = [b["c"] for b in mumlar(k, "1h", 250)[:-1]]
+                e50, e200 = ema(kap, 50), ema(kap, 200)
+                ters_long = p["yon"] == "LONG" and e50 < e200 and fiyat < e50
+                ters_short = p["yon"] == "SHORT" and e50 > e200 and fiyat > e50
+                if ters_long or ters_short:
                     gonder(f"🔄 <b>{ad}</b> zararda ({r:+.2f}R{pnl_yaz(p, fiyat)}) ve 1 saatlik trend "
                            f"pozisyonun aleyhine döndü.\nErken çıkıp kaybı küçültmeyi düşün. "
                            f"Stop'u beklemek zorunda değilsin.")
