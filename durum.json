@@ -1,7 +1,9 @@
 {
   "offset": 179899541,
   "pozisyonlar": {},
-  "taranan": {},
+  "taranan": {
+    "BTC_USDT": 1793551500
+  },
   "son_ozet": "2026-11-01 14",
   "ai_gun": "2026-11-01",
   "ai_sayac": 4
