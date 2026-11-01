@@ -280,7 +280,7 @@ def haberler(adet_kaynak=6):
     return basliklar
 
 
-def claude_sor(sistem, mesaj, durum, max_tokens=500):
+def claude_sor(sistem, mesaj, durum, max_tokens=900):
     """Claude'a sorar. Anahtar yoksa, günlük limit dolduysa ya da hata olursa None döner."""
     if not ANTHROPIC_API_KEY:
         return None
@@ -303,7 +303,15 @@ def claude_sor(sistem, mesaj, durum, max_tokens=500):
         if r.status_code != 200:
             print(f"Claude API hatası {r.status_code}: {r.text[:300]}")
             return None
-        return "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
+        j = r.json()
+        metin = "".join(b.get("text", "") for b in j.get("content", []) if b.get("type") == "text")
+        if j.get("stop_reason") == "max_tokens":
+            # Cevap token sınırında kesildiyse son tam cümlede bitir
+            son = max(metin.rfind(". "), metin.rfind("! "), metin.rfind("? "), metin.rfind(".\n"))
+            if son > 0:
+                metin = metin[: son + 1]
+            print("Uyarı: Claude cevabı token sınırında kesildi.")
+        return metin
     except requests.RequestException as e:
         print(f"Claude API'ye ulaşılamadı: {e}")
         return None
@@ -359,7 +367,7 @@ def ai_ozet_yorumu(ozet_satirlari, fng, haber_listesi, durum):
              + ("\n".join(haber_listesi) or "haber alınamadı")
              + "\n\nEn fazla 3 cümle: genel hava, takvimdeki/haberdeki en önemli risk, "
                "bugün için tavır (agresif / seçici / bekle).")
-    return claude_sor(sistem, mesaj, durum, max_tokens=300)
+    return claude_sor(sistem, mesaj, durum, max_tokens=800)
 
 
 def kart(s, ai=None):
