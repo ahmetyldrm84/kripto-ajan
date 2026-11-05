@@ -27,6 +27,7 @@ Telegram komutları:
   /yardim             komut listesi
 """
 
+import math
 import os
 import sys
 import json
@@ -41,10 +42,15 @@ import requests
 # ---------------------------------------------------------------- AYARLAR
 # GitHub'da tanımlanmamış değişken boş metin olarak gelir; boşsa varsayılan liste kullanılır.
 IZLEME = [k.strip() for k in (os.getenv("IZLEME") or "BTC_USDT,ETH_USDT,XRP_USDT,SOL_USDT,ZEC_USDT").split(",") if k.strip()]
-BAKIYE = float(os.getenv("BAKIYE") or 45)            # Gate.io bakiyen
-DURDURMA = float(os.getenv("DURDURMA") or 20)        # kill switch
+BAKIYE = float(os.getenv("BAKIYE") or 200)           # Gate.io bakiyen
+DURDURMA = float(os.getenv("DURDURMA") or 160)       # kill switch: bakiye bunun altına inerse yeni sinyal yok
 MIN_GUVEN = int(os.getenv("MIN_GUVEN") or 7)         # bunun altı sinyal gönderilmez
-MAKS_RISK_YUZDE = float(os.getenv("MAKS_RISK") or 5) # stop'ta bakiyenin en fazla %5'i
+MAKS_RISK_YUZDE = float(os.getenv("MAKS_RISK") or 1.5)  # stop'ta bakiyenin en fazla %1,5'i
+MAKS_KALDIRAC = int(os.getenv("MAKS_KALDIRAC") or 3)     # kaldıraç tavanı
+MAKS_MARJ_PAYI = 0.34                                     # tek işleme bakiyenin en fazla ~1/3'ü teminat
+KOMISYON_YUZDE = float(os.getenv("KOMISYON") or 0.05)    # tek yön, pozisyon değeri üzerinden (piyasa emri)
+# Claude varsayılan olarak veto edemez: itiraz ederse pozisyon yarıya iner. AI_VETO=acik eski davranışa döner.
+AI_VETO = (os.getenv("AI_VETO") or "kapali").lower() == "acik"
 OZET_SAATLERI_UTC = (6, 18)                           # TR saatiyle 09:00 ve 21:00
 DONGU_SANIYE = 300                                    # --dongu modunda tur aralığı
 
@@ -173,20 +179,27 @@ def kontrat_adi(s):
 
 
 # ---------------------------------------------------------------- TARAMA
-def analiz_et(kontrat, fng):
+def analiz_et(kontrat, fng, son_bakilan=0):
+    """Son 4 kapanmış 15dk mumu içinde, daha önce bakılmamış en yeni Donchian kırılımını arar.
+    GitHub zamanlanmış çalışmaları gecikebildiği için yalnızca son mumu kontrol etmek kırılımları kaçırıyordu."""
     m15 = mumlar(kontrat, "15m", 120)[:-1]   # son mum kapanmadı, at
     h1 = mumlar(kontrat, "1h", 250)[:-1]
-    son = m15[-1]
-    pencere = m15[-21:-1]
+    son, yon, pencere = None, None, None
+    for i in range(len(m15) - 1, len(m15) - 5, -1):
+        b = m15[i]
+        if b["t"] <= son_bakilan:
+            break
+        pen = m15[i - 20:i]
+        if b["c"] > max(x["h"] for x in pen):
+            son, yon, pencere = b, "LONG", pen
+        elif b["c"] < min(x["l"] for x in pen):
+            son, yon, pencere = b, "SHORT", pen
+        if son:
+            break
+    if son is None:
+        return None  # kırılım yok, sessiz kal
     ust = max(b["h"] for b in pencere)
     alt = min(b["l"] for b in pencere)
-
-    if son["c"] > ust:
-        yon = "LONG"
-    elif son["c"] < alt:
-        yon = "SHORT"
-    else:
-        return None  # kırılım yok, sessiz kal
 
     kapanislar = [b["c"] for b in h1]
     e50, e200 = ema(kapanislar, 50), ema(kapanislar, 200)
@@ -228,7 +241,11 @@ def analiz_et(kontrat, fng):
     puan = max(1, min(10, puan))
 
     a = atr(m15)
-    giris = son["c"]
+    giris = t.get("son") or son["c"]           # kart canlı fiyattan hesaplanır
+    kacti = (giris - son["c"]) if yon == "LONG" else (son["c"] - giris)
+    if kacti > 0.5 * a:                           # fiyat kırılımdan yarım ATR'den fazla uzaklaşmış
+        return {"kontrat": kontrat, "yon": yon, "mum": son["t"], "kacti": True,
+                "kirilim": son["c"], "giris": giris, "puan": puan}
     stop = giris - 1.5 * a if yon == "LONG" else giris + 1.5 * a
     tp = giris + 2 * (giris - stop)
 
@@ -243,20 +260,21 @@ def analiz_et(kontrat, fng):
 
 
 def boyutla(s):
-    """Güven kademesine göre marj ve kaldıraç; stop'ta kayıp bakiyenin MAKS_RISK'ini geçemez."""
+    """Risk tabanlı boyut: stop'ta kayıp (komisyon dahil) bakiyenin MAKS_RISK'ini geçmez,
+    kaldıraç MAKS_KALDIRAC'ı, teminat bakiyenin ~1/3'ünü geçmez."""
     stop_yuzde = abs(s["giris"] - s["stop"]) / s["giris"]
-    if s["puan"] >= 8:
-        marj, kaldirac = BAKIYE * 0.45, 7
-    else:
-        marj, kaldirac = BAKIYE * 0.22, 4
+    tp_yuzde = abs(s["tp"] - s["giris"]) / s["giris"]
+    kom = KOMISYON_YUZDE / 100
     maks_kayip = BAKIYE * MAKS_RISK_YUZDE / 100
-    while kaldirac > 1 and marj * kaldirac * stop_yuzde > maks_kayip:
-        kaldirac -= 1
-    if marj * kaldirac * stop_yuzde > maks_kayip:
-        marj = maks_kayip / stop_yuzde
-    deger = marj * kaldirac
-    s.update(marj=marj, kaldirac=kaldirac, deger=deger,
-             kayip=deger * stop_yuzde, kazanc=deger * stop_yuzde * 2)
+    deger = maks_kayip / (stop_yuzde + 2 * kom)            # pozisyon değeri (notional)
+    marj_tavan = BAKIYE * MAKS_MARJ_PAYI
+    kaldirac = min(MAKS_KALDIRAC, max(1, math.ceil(deger / marj_tavan)))
+    if deger > marj_tavan * kaldirac:
+        deger = marj_tavan * kaldirac
+    marj = deger / kaldirac
+    komisyon = deger * kom * 2
+    s.update(marj=marj, kaldirac=kaldirac, deger=deger, komisyon=komisyon,
+             kayip=deger * stop_yuzde + komisyon, kazanc=deger * tp_yuzde - komisyon)
 
 
 # ---------------------------------------------------------------- CLAUDE ANALİZİ
@@ -382,7 +400,9 @@ def kart(s, ai=None):
         f"STOP-LOSS: {fiyat_yaz(s['stop'])}\n"
         f"TAKE-PROFIT: {fiyat_yaz(s['tp'])}\n"
         f"GÜVEN: {s['puan']}/10\n"
-        f"RİSK: stop'ta ≈ -{s['kayip']:.2f} / TP'de ≈ +{s['kazanc']:.2f} USDT"
+        f"KOMİSYON: aç+kapa ≈ {s['komisyon']:.2f} USDT (fonlama hariç)\n"
+        f"NET: stop'ta ≈ -{s['kayip']:.2f} (bakiyenin %{s['kayip'] / BAKIYE * 100:.1f}'i) · "
+        f"TP'de ≈ +{s['kazanc']:.2f} USDT"
     )
     ekle = (f"/ekle {coin} {s['yon']} {fiyat_yaz(s['giris']).replace(',', '')} "
             f"{fiyat_yaz(s['stop']).replace(',', '')} {fiyat_yaz(s['tp']).replace(',', '')} "
@@ -670,7 +690,7 @@ def tur(durum):
         if k in durum["pozisyonlar"]:
             continue  # açık pozisyon varken aynı coine yeni sinyal yok
         try:
-            s = analiz_et(k, fng)
+            s = analiz_et(k, fng, durum["taranan"].get(k, 0))
         except Exception as e:
             print(f"{k} analiz hatası: {e}")
             continue
@@ -680,18 +700,25 @@ def tur(durum):
         if durum["taranan"].get(k) == s["mum"]:
             continue  # bu mumun sinyali zaten değerlendirildi
         durum["taranan"][k] = s["mum"]
+        ad = f"{k.replace('_USDT', '')} {s['yon']}"
+        if s.get("kacti"):
+            gonder(f"⚪ {ad} kırılımı oldu ({fiyat_yaz(s['kirilim'])}) ama fiyat uzaklaştı "
+                   f"({fiyat_yaz(s['giris'])}). Kovalanmaz, kart yok.")
+            continue
         if s["puan"] < MIN_GUVEN:
-            print(f"{k}: {s['yon']} kırılımı var ama güven {s['puan']}/10, gönderilmedi")
+            gonder(f"⚪ {ad} kırılımı var, kural güveni {s['puan']}/10 (en az {MIN_GUVEN} gerekir). Kart yok.\n"
+                   f"<i>{esc(' · '.join(s['notlar']) or 'ek teyit yok')}</i>")
             continue
         ai = ai_degerlendir(s, fng, haber_al(), durum) if ANTHROPIC_API_KEY else None
         if ai:
-            if ai["karar"] == "RED" or ai["guven"] < MIN_GUVEN:
-                print(f"{k}: Claude reddetti ({ai['karar']}, {ai['guven']}/10): {ai['yorum']}")
+            itiraz = ai["karar"] == "RED" or ai["guven"] < s["puan"]
+            if AI_VETO and (ai["karar"] == "RED" or ai["guven"] < MIN_GUVEN):
+                gonder(f"⚪ {ad} kurulumu kurallara uydu ama Claude reddetti: {esc(ai['yorum'])}")
                 continue
-            if ai["guven"] < s["puan"]:
-                s["notlar"].append(f"Claude güveni {s['puan']} → {ai['guven']} düşürdü")
-                s["puan"] = ai["guven"]
-                boyutla(s)  # daha düşük güven = daha küçük pozisyon
+            if itiraz:
+                s["notlar"].append(f"Claude temkinli ({ai['karar']}, {ai['guven']}/10): pozisyon yarıya indirildi")
+                for anahtar in ("marj", "deger", "kayip", "kazanc", "komisyon"):
+                    s[anahtar] /= 2
         gonder(kart(s, ai))
 
 
