@@ -2,13 +2,13 @@
   "offset": 179899542,
   "pozisyonlar": {},
   "taranan": {
-    "BTC_USDT": 1795119300,
+    "BTC_USDT": 1795122900,
     "ZEC_USDT": 1795119300,
-    "ETH_USDT": 1795107600,
-    "SOL_USDT": 1795106700,
-    "XRP_USDT": 1795119300
+    "ETH_USDT": 1795122900,
+    "SOL_USDT": 1795122900,
+    "XRP_USDT": 1795122900
   },
   "son_ozet": "2026-11-19 18",
   "ai_gun": "2026-11-19",
-  "ai_sayac": 10
+  "ai_sayac": 12
 }
