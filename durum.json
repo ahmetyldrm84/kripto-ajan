@@ -3,12 +3,12 @@
   "pozisyonlar": {},
   "taranan": {
     "BTC_USDT": 1795516200,
-    "ZEC_USDT": 1795516200,
+    "ZEC_USDT": 1795525200,
     "ETH_USDT": 1795510800,
-    "SOL_USDT": 1795516200,
-    "XRP_USDT": 1795516200
+    "SOL_USDT": 1795525200,
+    "XRP_USDT": 1795525200
   },
   "son_ozet": "2026-11-24 06",
   "ai_gun": "2026-11-24",
-  "ai_sayac": 12
+  "ai_sayac": 15
 }
